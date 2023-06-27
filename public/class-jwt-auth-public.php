@@ -75,6 +75,12 @@ class Jwt_Auth_Public {
 	 */
 	public function add_api_routes() {
 		register_rest_route( $this->namespace, 'token', [
+			'methods'             => 'GET',
+			'callback'            => [ $this, 'authorization' ],
+			'permission_callback' => '__return_true',
+		] );
+
+		register_rest_route( $this->namespace, 'token', [
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'generate_token' ],
 			'permission_callback' => '__return_true',
@@ -99,6 +105,44 @@ class Jwt_Auth_Public {
 	}
 
 	/**
+	 * Redirect the user to the WP login screen if they are not logged in, else generate the token and redirect back.
+	 * 
+	 * @param WP_REST_Request $request
+	 *
+	 * @return mixed|WP_Error|wp_redirect|null
+	 */
+	public function authorization( WP_REST_Request $request ) {
+		if( ! is_user_logged_in() ){
+			$redirected = "redirected";
+			if( $request->get_param($redirected) ){
+				return new WP_Error(
+					'jwt_auth_authorization',
+					__( 'Unknown error', 'wp-api-jwt-auth' ),
+					[
+						'status' => 500,
+					]
+				);
+			}
+			wp_redirect( wp_login_url( add_query_arg( $_GET, get_rest_url( null, $this->namespace . '/token?' . $redirected ) ) ) );
+			exit;
+		}
+
+		$data = $this->generate_token( $request );
+		if( $request->get_param("redirect_uri") ){
+			$data = http_build_query($data);
+			$url = $request->get_param("redirect_uri");
+			$query = parse_url($url, PHP_URL_QUERY);
+			if($query){
+				$url .= "&" . $data;
+			} else {
+				$url .= "?" . $data;
+			}
+			wp_redirect($url);
+		}
+		return [];
+	}
+
+	/**
 	 * Get the user and password in the request body and generate a JWT
 	 *
 	 * @param WP_REST_Request $request
@@ -107,33 +151,36 @@ class Jwt_Auth_Public {
 	 */
 	public function generate_token( WP_REST_Request $request ) {
 		$secret_key = defined( 'JWT_AUTH_SECRET_KEY' ) ? JWT_AUTH_SECRET_KEY : false;
-		$username   = $request->get_param( 'username' );
-		$password   = $request->get_param( 'password' );
+		$user = wp_get_current_user();
+		if( ! is_user_logged_in() ) {
+			$username   = $request->get_param( 'username' );
+			$password   = $request->get_param( 'password' );
+			
+			/** First thing, check the secret key if not exist return an error*/
+			if ( ! $secret_key ) {
+				return new WP_Error(
+					'jwt_auth_bad_config',
+					__( 'JWT is not configured properly, please contact the admin', 'wp-api-jwt-auth' ),
+					[
+						'status' => 403,
+					]
+				);
+			}
+			/** Try to authenticate the user with the passed credentials*/
+			$user = wp_authenticate( $username, $password );
 
-		/** First thing, check the secret key if not exist return an error*/
-		if ( ! $secret_key ) {
-			return new WP_Error(
-				'jwt_auth_bad_config',
-				__( 'JWT is not configured properly, please contact the admin', 'wp-api-jwt-auth' ),
-				[
-					'status' => 403,
-				]
-			);
-		}
-		/** Try to authenticate the user with the passed credentials*/
-		$user = wp_authenticate( $username, $password );
+			/** If the authentication fails return an error*/
+			if ( is_wp_error( $user ) ) {
+				$error_code = $user->get_error_code();
 
-		/** If the authentication fails return an error*/
-		if ( is_wp_error( $user ) ) {
-			$error_code = $user->get_error_code();
-
-			return new WP_Error(
-				'[jwt_auth] ' . $error_code,
-				$user->get_error_message( $error_code ),
-				[
-					'status' => 403,
-				]
-			);
+				return new WP_Error(
+					'[jwt_auth] ' . $error_code,
+					$user->get_error_message( $error_code ),
+					[
+						'status' => 403,
+					]
+				);
+			}
 		}
 
 		/** Valid credentials, the user exists create the according Token */
